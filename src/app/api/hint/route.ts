@@ -1,15 +1,13 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
 import { selectExamples, formatExamplesForPrompt } from '@/lib/hint-examples'
+import { SCOPE_INSTRUCTION, GUARDRAIL_SYSTEM_PROMPT, getHintModel } from '@/lib/prompts'
+import { safeParseJSON } from '@/lib/nim-fetch'
 
 export async function POST(request: Request) {
   const supabase = await createClient()
-
-  // Confirm someone's actually logged in before saving anything under their name
   const { data: { user } } = await supabase.auth.getUser()
-  if (!user) {
-    return NextResponse.json({ error: 'Not logged in' }, { status: 401 })
-  }
+  if (!user) return NextResponse.json({ error: 'Not logged in' }, { status: 401 })
 
   const { query, grade, subject } = await request.json()
 
@@ -21,52 +19,43 @@ Rules:
 - NEVER state the final answer.
 - This is a Level 1 hint: ask what they've tried, or ask a clarifying question about the problem.
 - Keep language simple enough for Grade ${grade}.
+${SCOPE_INSTRUCTION}
 
 Here are examples of good vs. bad hints at this exact level, for similar problems:
 
 ${exampleBlock}`
 
+  const modelToUse = getHintModel(subject)
+  console.log(`[hint] subject=${subject} -> model=${modelToUse}`)
+
   const hintResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.NVIDIA_NIM_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${process.env.NVIDIA_NIM_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      model: process.env.HINT_MODEL_NAME,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: query },
-      ],
+      model: modelToUse,
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: query }],
     }),
   })
 
-  const hintData = await hintResponse.json()
-  if (!hintResponse.ok) {
-    return NextResponse.json({ error: hintData }, { status: hintResponse.status })
+  const hintData = await safeParseJSON(hintResponse, 'hint')
+  if (!hintResponse.ok || !hintData) {
+    return NextResponse.json({ error: 'AI service returned an unexpected response' }, { status: 502 })
   }
   const draftHint = hintData.choices[0].message.content
 
   const guardrailResponse = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
     method: 'POST',
-    headers: {
-      Authorization: `Bearer ${process.env.NVIDIA_NIM_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: `Bearer ${process.env.NVIDIA_NIM_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model: process.env.GUARDRAIL_MODEL_NAME,
       messages: [
-        {
-          role: 'system',
-          content: `You check tutoring hints for leaked answers. Given a question and a draft hint, respond with ONLY valid JSON, nothing else: {"leaksAnswer": true or false, "safeHint": "the hint text, rewritten to remove the answer if needed, otherwise unchanged"}`,
-        },
+        { role: 'system', content: GUARDRAIL_SYSTEM_PROMPT },
         { role: 'user', content: `Question: ${query}\nDraft hint: ${draftHint}` },
       ],
     }),
   })
-
-  const guardrailData = await guardrailResponse.json()
-  if (!guardrailResponse.ok) {
+  const guardrailData = await safeParseJSON(guardrailResponse, 'guardrail')
+  if (!guardrailResponse.ok || !guardrailData) {
     return NextResponse.json({ error: 'Guardrail check failed' }, { status: 500 })
   }
 
@@ -77,24 +66,15 @@ ${exampleBlock}`
     return NextResponse.json({ error: 'Guardrail response could not be verified' }, { status: 500 })
   }
 
-  // === NEW: save the question, then the hint against it ===
   const { data: questionRow, error: questionError } = await supabase
     .from('questions')
     .insert({ user_id: user.id, query_text: query, grade, subject, current_level: 1 })
-    .select()
-    .single()
-
-  if (questionError) {
-    return NextResponse.json({ error: 'Could not save question' }, { status: 500 })
-  }
+    .select().single()
+  if (questionError) return NextResponse.json({ error: 'Could not save question' }, { status: 500 })
 
   const { error: hintError } = await supabase
-    .from('hints')
-    .insert({ question_id: questionRow.id, level: 1, hint_text: finalHint })
-
-  if (hintError) {
-    return NextResponse.json({ error: 'Could not save hint' }, { status: 500 })
-  }
+    .from('hints').insert({ question_id: questionRow.id, level: 1, hint_text: finalHint })
+  if (hintError) return NextResponse.json({ error: 'Could not save hint' }, { status: 500 })
 
   return NextResponse.json({ hint: finalHint, questionId: questionRow.id })
 }

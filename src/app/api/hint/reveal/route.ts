@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server'
 import { createClient } from '@/lib/supabase/server'
+import { SCOPE_INSTRUCTION } from '@/lib/prompts'
 
 export async function POST(request: Request) {
   const supabase = await createClient()
@@ -29,10 +30,11 @@ export async function POST(request: Request) {
     )
   }
 
-  const systemPrompt = `You are a ${question.subject} tutor for a Grade ${question.grade} student.
+    const systemPrompt = `You are a ${question.subject} tutor for a Grade ${question.grade} student.
 The student has already worked through three hint levels and is still stuck.
 Now clearly explain the full solution, step by step, ending with the final answer.
-Keep language simple enough for Grade ${question.grade}. Be encouraging, not just correct.`
+Keep language simple enough for Grade ${question.grade}. Be encouraging, not just correct.
+${SCOPE_INSTRUCTION}`
 
   const response = await fetch('https://integrate.api.nvidia.com/v1/chat/completions', {
     method: 'POST',
