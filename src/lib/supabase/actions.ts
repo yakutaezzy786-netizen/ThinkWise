@@ -47,3 +47,29 @@ export async function login(formData: FormData) {
 
   redirect('/dashboard')
 }
+
+export async function provideConsent(formData: FormData) {
+  const supabase = await createClient()
+  const { data: { user } } = await supabase.auth.getUser()
+  if (!user) {
+    redirect('/login')
+  }
+
+  const guardianName = formData.get('guardianName') as string
+  const guardianEmail = formData.get('guardianEmail') as string
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({
+      guardian_consent: true,
+      guardian_name: guardianName,
+      guardian_email: guardianEmail,
+    })
+    .eq('id', user.id)
+
+  if (error) {
+    redirect(`/consent?error=${encodeURIComponent(error.message)}`)
+  }
+
+  redirect('/dashboard')
+}
